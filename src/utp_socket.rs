@@ -1,6 +1,7 @@
 use std::io;
 use std::net::SocketAddr;
 use std::task::{Context, Poll};
+use bytes::BufMut;
 use tokio::net::ToSocketAddrs;
 use log::info;
 
@@ -59,4 +60,9 @@ impl UtpSocket {
         self.socket.poll_send_to(ctx, buf, peer_addr)
 
     }
+
+    pub async fn recv_buf_from<B: BufMut>(&self, buf: &mut B) -> io::Result<(usize, SocketAddr)> {
+        self.socket.recv_buf_from(buf).await
+    }
+
 }

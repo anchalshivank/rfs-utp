@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::future::Future;
 use std::io::{Error, Read};
 use crate::utp_socket::UtpSocket;
@@ -7,7 +8,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use log::{debug, error, info};
 use tokio::io;
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::io::{AsyncRead, AsyncWrite, Join, ReadBuf};
 use std::net::SocketAddr;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{mpsc, Mutex};
@@ -16,14 +17,165 @@ use tokio::task::JoinHandle;
 const UDP_BUFFER_SIZE: usize = 17480;
 const CHANNEL_LEN: usize = 100;
 
+pub struct UtpListener{
+    handler: JoinHandle<()>,
+    receiver: Arc<Mutex<mpsc::Receiver<(UtpStream, SocketAddr)>>>,
+    local_addr: SocketAddr
+}
+
+impl Drop for UtpListener {
+
+    fn drop(&mut self){
+        self.handler.abort();
+    }
+
+}
+
+impl UtpListener {
+    pub async fn bind(local_addr: SocketAddr) -> io::Result<UtpListener> {
+
+        let utp_socket = UtpSocket::bind(local_addr).await?;
+        //define handler and received things
+        Self::from_tokio(utp_socket).await
+
+    }
+
+    pub async fn from_tokio(utp_socket: UtpSocket) -> io::Result<UtpListener> {
+
+        let (tx, rx) = mpsc::channel(CHANNEL_LEN);
+        //this is the current address of the socket
+        let local_addr = utp_socket.local_addr()?;
+
+        //Don't know but to join all tasks
+        let handler = tokio::spawn(
+            async move {
+                //keeps the record of all streams
+                let mut streams : HashMap<SocketAddr, mpsc::Sender<Bytes>> = HashMap::new();
+
+                let socket = Arc::new(utp_socket);
+
+                //I do not know what these are .. but sender and receiver
+                let (drop_tx, mut drop_rx) = mpsc::channel(1);
+
+                //I think this is the simple array of bytes approx 54 kb
+                let mut buf = BytesMut::with_capacity(UDP_BUFFER_SIZE * 3);
+
+                loop {
+
+                    if buf.capacity() < UDP_BUFFER_SIZE {
+                        buf.reserve(UDP_BUFFER_SIZE * 3);
+                    }
+
+                    tokio::select! {
+
+                        Some(peer_addr) = drop_rx.recv() => {
+                            streams.remove(&peer_addr);
+                        }
+
+                        Ok((len, peer_addr)) = socket.recv_buf_from(&mut buf) =>
+                        {
+                            match streams.get_mut(&peer_addr) {
+
+                            Some(child_tx) =>{
+                                //found a streams present on that address
+                                if let Err(err) = child_tx.send(buf.copy_to_bytes(len)).await {
+
+                                    error!("child_tx.send {:?}", err);
+                                    child_tx.closed().await;
+                                    streams.remove(&peer_addr);
+                                    continue;
+
+                                }
+
+                            }
+                            None => {
+                                //it means there is no streams present on that address
+
+                                let (child_tx, child_rx) = mpsc::channel(CHANNEL_LEN);
+                                if let Err(err) = child_tx.send(buf.copy_to_bytes(len)).await {
+                                    error!("child_tx.send {:?}", err);
+                                    continue;
+                                }
+
+                                let utp_stream = UtpStream {
+
+                                    local_addr,
+                                    peer_addr,
+                                    receiver: Arc::new(Mutex::new(child_rx)),
+                                    socket: socket.clone(),
+                                    handler: None,
+                                    drop: Some(drop_tx.clone()),
+                                    remaining: None
+
+                                };
+
+                                if let Err(err) = tx.send((utp_stream, peer_addr)).await {
+
+                                    error!("child_tx.send {:?}", err);
+                                    continue;
+
+                                }
+
+                                streams.insert(peer_addr, child_tx.clone());
+
+
+                            }
+
+
+                        }
+                        }
+
+                    }
+
+                }
+
+            }
+        );
+
+        Ok(Self{
+            handler,
+            receiver: Arc::new(Mutex::new(rx)),
+            local_addr,
+        })
+
+    }
+
+    pub async fn accept(&self) -> io::Result<(UtpStream, SocketAddr)> {
+
+        self.receiver.lock().await.recv().await.ok_or(io::Error::from(io::ErrorKind::WouldBlock))
+
+    }
+
+}
+
+
+
+
 pub struct UtpStream {
     pub socket: Arc<UtpSocket>,
     handler: Option<JoinHandle<()>>,
     receiver: Arc<Mutex<Receiver<Bytes>>>,
     remaining: Option<Bytes>,
-    drop: Option<Sender<Bytes>>,
+    drop: Option<Sender<SocketAddr>>,
     peer_addr: SocketAddr,
     local_addr: SocketAddr
+}
+
+
+impl Drop for UtpStream {
+
+    fn drop(&mut self) {
+
+        if let Some(handler) = &self.handler{
+            handler.abort();
+        }
+
+        if let Some(drop) = &self.drop{
+            let _ = drop.try_send(self.peer_addr);
+        }
+
+    }
+
 }
 
 async fn to_socket_addr<A>(addr: A) -> io::Result<SocketAddr>
@@ -40,24 +192,15 @@ where
 }
 
 impl UtpStream {
-    pub async fn bind<A>(addr: A) -> Result<UtpStream, tokio::io::Error>
-    where
-        A: tokio::net::ToSocketAddrs + Clone
-    {
-        debug!("Starting UTP stream server");
-        let socket = UtpSocket::bind(addr.clone()).await?;
-        let peer_addr = to_socket_addr(addr).await?;
-        Self::from_tokio(socket, peer_addr).await
-    }
 
     pub async fn connect<A>(addr: A) -> Result<UtpStream, tokio::io::Error>
     where
         A: tokio::net::ToSocketAddrs + Clone
     {
         debug!("Starting UTP stream server connection");
-        let peer_addr = to_socket_addr(addr).await?;
-        let socket = UtpSocket::connect(peer_addr).await?;
-        Self::from_tokio(socket, peer_addr).await
+        let local_addr = to_socket_addr(addr).await?;
+        let socket = UtpSocket::connect(local_addr).await?;
+        Self::from_tokio(socket, local_addr).await
 
     }
 
@@ -65,47 +208,34 @@ impl UtpStream {
     {
         let socket = Arc::new(socket);
         let local_addr = socket.local_addr()?;
-        let socket_inner = socket.clone();
+
         let (child_tx, child_rx) = mpsc::channel(CHANNEL_LEN);
+        let socket_inner = socket.clone();
 
         let handler = tokio::spawn(async move {
             let mut buf = BytesMut::with_capacity(UDP_BUFFER_SIZE);
-            // let mut established_peer = None;
 
-            loop {
-                match socket_inner.recv_from(buf.as_mut()).await {
-                    Ok((len, received_addr)) => {
-                        let received_data = String::from_utf8_lossy(&buf[..len]);
-                        info!("------------------------------- {} and data is  {} and len is {}", received_addr, received_data, len);
-                        // if established_peer.is_none() {
-                        //     log::info!("Establishing peer address: {}", received_addr);
-                        //     established_peer = Some(received_addr);
-                        // }
+            while let Ok((len, received_addr)) = socket_inner.clone().recv_buf_from(&mut buf).await{
 
-                        // if Some(received_addr) != established_peer {
-                        //     let received_data = String::from_utf8_lossy(&buf[..len]);
-                        //     log::info!("Received data: '{}' from unexpected peer: {}", received_data, received_addr);
-                        //     continue;
-                        // }
-
-                        if child_tx.send(buf.split_to(len).freeze()).await.is_err() {
-                            log::warn!("Receiver channel closed");
-                            break;
-                        }
-
-                        // if buf.capacity() < UDP_BUFFER_SIZE {
-                        //     buf.reserve(UDP_BUFFER_SIZE);
-                        // }
-                    }
-                    Err(e) => {
-                        log::error!("Error receiving data: {}", e);
-                        break;
-                    }
+                if received_addr != peer_addr {
+                    continue;
                 }
+
+                if child_tx.send(buf.copy_to_bytes(len)).await.is_err() {
+
+                    child_tx.closed().await;
+                    break;
+
+                }
+
+                if buf.capacity() < UDP_BUFFER_SIZE {
+                    buf.reserve(UDP_BUFFER_SIZE*3);
+                }
+
+
             }
+
         });
-
-
 
         Ok(
             UtpStream {
@@ -128,6 +258,12 @@ impl UtpStream {
 
     pub fn local_addr(&self) -> Result<SocketAddr, tokio::io::Error> {
         Ok(self.local_addr)
+    }
+
+    pub fn shutdown(&self){
+        if let Some(drop) = &self.drop{
+            let _ = drop.try_send(self.peer_addr);
+        };
     }
 
 }

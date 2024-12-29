@@ -6,7 +6,7 @@ use env_logger::Builder;
 use log::Level;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use std::io::Write;
-use utp::utp_stream::UtpStream;
+use utp::stream::UtpStream;
 
 fn init_logger() {
     Builder::new()

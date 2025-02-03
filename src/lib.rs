@@ -4,5 +4,6 @@ pub mod packet;
 pub mod error;
 pub mod bit_iterator;
 pub mod time;
-mod congestion_control;
-mod packet_loss_handler;
+pub mod congestion_control;
+pub mod packet_loss_handler;
+pub mod util;

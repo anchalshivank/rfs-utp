@@ -5,6 +5,7 @@ use crate::bit_iterator::BitIterator;
 use crate::error::ParseError;
 use crate::time::{Delay, Timestamp};
 use std::fmt;
+use tokio::io::ReadBuf;
 use crate::packet;
 
 pub const HEADER_SIZE: usize = 20;
@@ -389,6 +390,15 @@ impl<'a> TryFrom<&'a [u8]> for Packet {
     }
 }
 
+impl<'a> TryFrom<&'a mut ReadBuf<'_>> for Packet {
+    type Err = ParseError;
+
+    fn try_from(read_buf: &'a mut ReadBuf<'_>) -> Result<Self, Self::Err> {
+        let buf = read_buf.filled(); // Get the filled portion of the buffer
+        <Packet as TryFrom<&[u8]>>::try_from(buf) // Delegate to the existing TryFrom<&[u8]> implementation
+    }
+}
+
 impl Clone for Packet {
     fn clone(&self) -> Packet {
         Packet(self.0.clone())
@@ -407,6 +417,7 @@ impl fmt::Debug for Packet {
             .field("wnd_size", &self.wnd_size())
             .field("seq_nr", &self.seq_nr())
             .field("ack_nr", &self.ack_nr())
+            .field("data", &self.payload())
             .finish()
     }
 }

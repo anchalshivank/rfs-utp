@@ -27,15 +27,23 @@ impl UtpStream {
 
 impl AsyncRead for UtpStream {
     fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
-        println!("1 {:?}", String::from_utf8_lossy(buf.filled()));
-        self.socket.poll_recv_from(cx, buf).map(|a| Ok(()))
+        let this = self.get_mut();
 
+        this.socket.recv_packets_from(cx, buf).map(|_| Ok(()))
     }
 }
 
 impl AsyncWrite for UtpStream {
     fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
-        self.socket.poll_send(cx, buf)
+        println!("writing --------- {:?}", buf);
+        let  this = self.get_mut();
+
+        if let Err(error) = this.socket.send_packets(cx, buf) {
+            return Poll::Ready(Err(error));
+        }
+
+        Poll::Ready(Ok(buf.len()))
+
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {

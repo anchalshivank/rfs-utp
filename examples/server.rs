@@ -19,7 +19,7 @@ async fn main() {
 
     let mut server = UtpStream::bind(Some(socket_addr)).await;
 
-    let mut buf = vec![0u8; 5];
+    let mut buf = vec![0u8; 25];
     loop{
 
         match server.read(&mut buf).await{
@@ -29,7 +29,7 @@ async fn main() {
 
                 let received_data = &buf[0..len];
 
-                println!("received data: {:?}", std::str::from_utf8(received_data).unwrap());
+                println!("received data: {:?}", String::from_utf8_lossy(received_data));
 
 
 

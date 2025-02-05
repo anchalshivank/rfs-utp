@@ -1,49 +1,80 @@
 use crate::socket::UtpSocket;
 use futures::AsyncWrite;
+use log::info;
 use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use tokio::io::{AsyncRead, ReadBuf};
-use tokio::net::ToSocketAddrs;
-
+use tokio::io::{AsyncRead, Interest, ReadBuf, Ready};
+use tokio::sync::mpsc;
+use tokio::sync::mpsc::Receiver;
+use futures::Future;
+//Wrapper over UtpStream
 pub struct UtpStream {
-    socket: UtpSocket
+    socket: UtpSocket,
+    receiver: Receiver<Vec<u8>>,
 }
 
 impl UtpStream {
     pub async fn bind(addr: Option<SocketAddr>) -> UtpStream {
-        let socket = UtpSocket::bind(addr).await;
-        Self { socket }
+        let (sender, receiver) = mpsc::channel(100);
+        let socket = UtpSocket::bind(addr, Some(sender)).await;
+        let r = socket.clone();
+        info!("in binding");
+        let r = socket.clone();
+
+        tokio::spawn(async move {
+            r.start_receiving().await;
+        });
+        Self { socket, receiver }
     }
 
-    pub async fn connect<A: ToSocketAddrs>(&self, addr: A) -> io::Result<()> {
-
+    pub async fn connect(&mut self, addr: SocketAddr) -> io::Result<()> {
         self.socket.connect(addr).await
-
     }
 
+    pub async fn ready(&self, interest: Interest) -> io::Result<Ready> {
+        self.socket.ready(interest).await
+    }
 }
 
 impl AsyncRead for UtpStream {
-    fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-
-        this.socket.recv_packets_from(cx, buf).map(|_| Ok(()))
+        match this.receiver.poll_recv(cx) {
+            Poll::Ready(Some(data)) => {
+                let amt = std::cmp::min(buf.remaining(), data.len());
+                buf.put_slice(&data[..amt]);
+                info!("received data {:?} ", String::from_utf8_lossy(buf.filled()));
+                Poll::Ready(Ok(()))
+            }
+            Poll::Ready(None) => Poll::Ready(Ok(())),
+            Poll::Pending => Poll::Pending,
+        }
     }
 }
 
 impl AsyncWrite for UtpStream {
-    fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
-        println!("writing --------- {:?}", buf);
-        let  this = self.get_mut();
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
 
-        if let Err(error) = this.socket.send_packets(cx, buf) {
-            return Poll::Ready(Err(error));
+        // Create a pinned future
+        let mut send_future = Box::pin(this.socket.send_packets(buf, None));
+
+        // Poll the future
+        match send_future.as_mut().poll(cx) {
+            Poll::Ready(Ok(())) => Poll::Ready(Ok(buf.len())),
+            Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+            Poll::Pending => Poll::Pending,
         }
-
-        Poll::Ready(Ok(buf.len()))
-
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {

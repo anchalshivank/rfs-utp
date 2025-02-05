@@ -2,7 +2,6 @@ use crate::packet::Packet;
 
 /// Trait defining the behaviour for handling packet loss in uTP
 pub trait PacketLossHandler {
-
     /// Handles packet loss detected through the duplicate acknowledgements or timeouts
     ///
     /// # Arguments
@@ -20,5 +19,4 @@ pub trait PacketLossHandler {
 
     /// Advances the send windows by removing acknowledged packets
     async fn advance_send_window(&mut self);
-
 }

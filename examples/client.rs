@@ -1,91 +1,82 @@
+use chrono::Local;
+use env_logger::Builder;
+use futures_util::io::AsyncWriteExt;
+use log::{error, info, Level, LevelFilter};
+use std::io::Write;
 use std::net::SocketAddr;
 use std::str::FromStr;
-use futures_util::io::AsyncWriteExt;
-use tokio::io::{AsyncReadExt};
-use tokio::sync::Mutex;
-use std::sync::Arc;
-use utp::stream::UtpStream;
-use tokio::{join, task};
 use tokio::io::{self, AsyncBufReadExt, BufReader};
+use utp::stream::UtpStream;
 
+fn init_logger() {
+    Builder::new()
+        .format(|buf, record| {
+            let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S");
+            let level = colored_level(record.level());
+            let file_path = record.file().unwrap_or("unknown");
+            let line_number = record.line().unwrap_or(0);
+
+            // Extract the relative path from "src/"
+            let trimmed_path = file_path
+                .rsplit_once("src/")
+                .map(|(_, relative)| format!("src/{}", relative))
+                .unwrap_or_else(|| file_path.to_string());
+
+            writeln!(
+                buf,
+                "[{}] [{}] [{}:{}] - {}",
+                timestamp,
+                level,
+                trimmed_path,
+                line_number,
+                record.args()
+            )
+        })
+        .filter(None, LevelFilter::Info)
+        .init();
+}
+
+fn colored_level(level: Level) -> String {
+    match level {
+        Level::Error => format!("\x1b[31m{}\x1b[0m", level), // Red
+        Level::Warn => format!("\x1b[33m{}\x1b[0m", level),  // Yellow
+        Level::Info => format!("\x1b[32m{}\x1b[0m", level),  // Green
+        Level::Debug => format!("\x1b[34m{}\x1b[0m", level), // Blue
+        Level::Trace => format!("\x1b[35m{}\x1b[0m", level), // Magenta
+    }
+}
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
-        eprintln!("Usage: client <port>");
+        error!("Usage: client <port>");
         std::process::exit(1);
     }
+    init_logger();
     let port: &String = &args[1];
     let addr = format!("127.0.0.1:{}", &port);
     let client_addr = SocketAddr::from_str(&addr).unwrap();
-
     let server_addr = SocketAddr::from_str("127.0.0.1:8080").unwrap();
 
-    let client_stream = Arc::new(Mutex::new(UtpStream::bind(Some(client_addr)).await));
-    let client_stream_clone = Arc::clone(&client_stream);
-    let client_stream_clone_read = Arc::clone(&client_stream_clone);
-
-    {
-        let mut stream = client_stream.lock().await;
-        match stream.connect(server_addr).await {
-            Ok(_) => {
-                println!("Connected to {}", server_addr);
-            }
-            Err(error) => {
-                println!("Error: {}", error);
-                return;
-            }
+    let mut client_stream = UtpStream::bind(Some(client_addr)).await;
+    match client_stream.connect(server_addr).await {
+        Ok(_) => info!("Connected to {}", server_addr),
+        Err(error) => {
+            error!("Error: {}", error);
+            return;
         }
     }
 
-
-
-
-
-    let write_task = task::spawn(async move {
-
-        let stdin = io::stdin();
-
-        let mut reader = BufReader::new(stdin).lines();
-
-        while let Ok(Some(message)) = reader.next_line().await {
-            println!("1 ---------- {}", message);
-            {
-                println!("locking ");
-                let mut stream = client_stream.lock().await;
-                println!("1 -------- {} ------ ", message);
-                match stream.write_all(message.as_bytes()).await {
-                    Ok(_) => println!("Sent: {}", message),
-                    Err(error) => println!("Error writing: {}", error),
-                }
-                drop(stream);
+    let stdin = io::stdin();
+    let mut reader = BufReader::new(stdin).lines();
+    while let Ok(Some(message)) = reader.next_line().await {
+        info!("Client write");
+        match client_stream.write_all(message.as_bytes()).await {
+            Ok(_) => info!("Sent: {}", message),
+            Err(error) => {
+                info!("Error writing: {}", error);
+                break;
             }
         }
-    });
-
-    let read_task = task::spawn(async move {
-        let mut buf = vec![0u8; 1024];
-        loop {
-            println!("Client reading");
-            {
-                println!("locking reading");
-                let mut stream = client_stream_clone_read.lock().await;
-                println!("Client reading -------- ");
-                match stream.read(&mut buf).await {
-                    Ok(len) => {
-                        println!("Received {} bytes", len);
-                        let received_data = &buf[..len];
-                        println!("Data: {:?}", String::from_utf8_lossy(received_data));
-                    }
-                    Err(error) => {
-                        eprintln!("Error reading from stream: {}", error);
-                        break;
-                    }
-                }
-                drop(stream);
-            }
-        }
-    });
-
-    let _ = join!(read_task, write_task);
+    }
 }

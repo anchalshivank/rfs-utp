@@ -1,9 +1,9 @@
+pub mod bit_iterator;
+pub mod congestion_control;
+pub mod error;
+pub mod packet;
+pub mod packet_loss_handler;
 pub mod socket;
 pub mod stream;
-pub mod packet;
-pub mod error;
-pub mod bit_iterator;
 pub mod time;
-pub mod congestion_control;
-pub mod packet_loss_handler;
 pub mod util;

@@ -1,9 +1,9 @@
-use std::sync::Arc;
 use colored::Colorize;
+use std::sync::Arc;
 // udp_client.rs
-use tokio::net::UdpSocket;
-use tokio::io::{self, AsyncBufReadExt};
 use tokio::io::BufReader;
+use tokio::io::{self, AsyncBufReadExt};
+use tokio::net::UdpSocket;
 use tokio::task;
 
 #[tokio::main]
@@ -29,7 +29,9 @@ async fn main() -> io::Result<()> {
     loop {
         println!("Enter message: ");
         if let Ok(message) = reader.next_line().await {
-            socket.send_to(message.clone().unwrap().as_bytes(), server_addr).await?;
+            socket
+                .send_to(message.clone().unwrap().as_bytes(), server_addr)
+                .await?;
             println!("Sent: {}", message.unwrap());
         }
     }

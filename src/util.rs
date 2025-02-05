@@ -1,6 +1,7 @@
 use num_traits::ToPrimitive;
 use rand::{self, Rng};
 use std::ops::Sub;
+use uuid::Uuid;
 
 /// Calculate the exponential weighted moving average for a vector of numbers, with a smoothing
 /// factor `alpha` between 0 and 1. A higher `alpha` discounts older observations faster.
@@ -39,6 +40,9 @@ pub fn generate_sequential_identifiers() -> (u16, u16) {
     }
 }
 
+pub fn generate_uuid() -> Uuid {
+    Uuid::new_v4()
+}
 #[cfg(test)]
 mod test {
     use crate::util::*;

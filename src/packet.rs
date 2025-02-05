@@ -1,12 +1,11 @@
 #![allow(dead_code)]
 
-
 use crate::bit_iterator::BitIterator;
 use crate::error::ParseError;
+use crate::packet;
 use crate::time::{Delay, Timestamp};
 use std::fmt;
 use tokio::io::ReadBuf;
-use crate::packet;
 
 pub const HEADER_SIZE: usize = 20;
 

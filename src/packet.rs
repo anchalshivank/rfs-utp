@@ -2,9 +2,10 @@
 
 use crate::bit_iterator::BitIterator;
 use crate::error::ParseError;
+use crate::packet;
 use crate::time::{Delay, Timestamp};
 use std::fmt;
-use crate::packet;
+use tokio::io::ReadBuf;
 
 pub const HEADER_SIZE: usize = 20;
 
@@ -144,7 +145,7 @@ impl PacketHeader {
 
     /// Returns the packet's type.
     pub fn get_type(&self) -> PacketType {
-        <packet::PacketType as packet::TryFrom<u8>>::try_from(self.type_ver >> 4).unwrap()
+        <PacketType as packet::TryFrom<u8>>::try_from(self.type_ver >> 4).unwrap()
     }
 
     /// Returns the packet's version.
@@ -182,7 +183,7 @@ impl<'a> TryFrom<&'a [u8]> for PacketHeader {
         }
 
         // Check packet type
-        if let Err(e) = <PacketType as TryFrom<u8>>::try_from(buf[0] >> 4) {
+        if let Err(e) = <PacketType as packet::TryFrom<u8>>::try_from(buf[0] >> 4) {
             return Err(e);
         }
 
@@ -382,9 +383,18 @@ impl<'a> TryFrom<&'a [u8]> for Packet {
     /// all except the initial 20 bytes corresponding to the header as payload.
     /// It's the caller's responsibility to use an appropriately sized buffer.
     fn try_from(buf: &[u8]) -> Result<Self, Self::Err> {
-        <PacketHeader as TryFrom<&[u8]>>::try_from(buf)
+        <PacketHeader as packet::TryFrom<&[u8]>>::try_from(buf)
             .and(check_extensions(buf))
             .and(Ok(Packet(buf.to_owned())))
+    }
+}
+
+impl<'a> TryFrom<&'a mut ReadBuf<'_>> for Packet {
+    type Err = ParseError;
+
+    fn try_from(read_buf: &'a mut ReadBuf<'_>) -> Result<Self, Self::Err> {
+        let buf = read_buf.filled(); // Get the filled portion of the buffer
+        <Packet as TryFrom<&[u8]>>::try_from(buf) // Delegate to the existing TryFrom<&[u8]> implementation
     }
 }
 

@@ -7,7 +7,7 @@ use std::path::Path;
 use chrono::Local;
 use colored::Colorize;
 use env_logger::Builder;
-use utp::stream::UtpStream;
+use utp::utp_stream::UtpStream;
 
 fn usage() -> ! {
     println!("Usage: utp [-s|-c] <address> <port>");

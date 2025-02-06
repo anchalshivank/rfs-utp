@@ -3,13 +3,13 @@ use std::path::Path;
 use chrono::Local;
 use colored::Colorize;
 use env_logger::Builder;
-use log::{info, Level};
+use log::Level;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     time::timeout,
 };
 use std::io::Write;
-use utp::stream::UtpListener;
+use utp::utp_stream::UtpListener;
 
 const UDP_BUFFER_SIZE: usize = 17480; // 17kb
 const UDP_TIMEOUT: u64 = 10 * 1000; // 10sec
@@ -63,9 +63,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let listener = UtpListener::bind(SocketAddr::from_str("127.0.0.1:8080")?).await?;
     loop {
-        let (mut stream, addr) = listener.accept().await?;
+        let (mut stream, _) = listener.accept().await?;
         tokio::spawn(async move {
-            info!("data received from {}", addr);
             let id = std::thread::current().id();
             let block = async move {
                 let mut buf = vec![0u8; UDP_BUFFER_SIZE];

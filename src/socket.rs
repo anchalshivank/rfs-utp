@@ -3,7 +3,7 @@ use crate::packet;
 use crate::packet::{Packet, PacketType};
 use crate::packet_loss_handler::PacketLossHandler;
 use crate::time::{now_microseconds, Delay, Timestamp};
-use crate::util::{abs_diff, generate_sequential_identifiers};
+use crate::util::{abs_diff, generate_sequential_identifiers, generate_u16_from_uuid_v4};
 use dashmap::DashMap;
 use log::{debug, error, info, warn};
 use std::collections::VecDeque;
@@ -138,7 +138,7 @@ impl UtpSocket {
     pub async fn bind(addr: Option<SocketAddr>, sender: Option<Sender<Vec<u8>>>) -> Self {
         let addr = addr.unwrap_or_else(|| SocketAddr::from_str("127.0.0.1:0").unwrap());
         let udp = Arc::new(UdpSocket::bind(addr).await.unwrap());
-        let (id, sender_connection_id) = generate_sequential_identifiers();
+        let id = generate_u16_from_uuid_v4();
         let peers = Arc::new(DashMap::new());
 
         // Now return the socket with the properly initialized state
@@ -150,15 +150,27 @@ impl UtpSocket {
         }
     }
 
-    pub async fn start_receiving(&self) {
-        info!("Start receving the task ");
-        let mut buf = [0; BUF_SIZE];
+    pub async fn start_receiving(&self) -> io::Result<()> {
+        info!("Start receiving the task");
+
+        let mut buf = [0; 25];
+
         loop {
-            self.recv_packets_from(&mut buf)
-                .await
-                .expect("Error receiving the message");
+            // Handle the result of recv_packets_from
+            match self.recv_packets_from(&mut buf).await {
+                Ok(_) => {
+                    // Handle the case where the packet is successfully received
+                    // No need for 'continue', it will automatically loop again
+                }
+                Err(e) => {
+                    // Log and return the error if something goes wrong
+                    info!("Error receiving the message: {}", e);
+                    return Err(e); // Return the error if recv_packets_from fails
+                }
+            }
         }
     }
+
 
     pub async fn connect(&mut self, addr: SocketAddr) -> io::Result<()> {
         // Check if the peer is already connected
@@ -188,36 +200,31 @@ impl UtpSocket {
                 // Send the Syn packet
                 match self.send(packet.as_ref()).await {
                     Ok(len) => {
-                        info!("Sent {} bytes", len);
-
                         // Once the packet is sent, await an acknowledgment
-                        let mut buf = [0; BUF_SIZE];
+                        let mut buf = [0; 25];
+
                         match self.recv_from(&mut buf).await {
                             Ok((read, src)) => {
-                                info!("----->> read {} bytes from {:?}", read, src);
-
+                                let received_packet = <Packet as packet::TryFrom<&[u8]>>::try_from(&buf[..read]);
+                                info!("Packet received is  {:?}", received_packet);
                                 // Update the state after receiving acknowledgment
                                 locked_peer_state.connected_to = Some(addr);
-
                                 // Insert the state into the `peers` DashMap
                                 self.peers.insert(addr, peer_state.clone());
 
                                 Ok(())
                             }
                             Err(err) => {
-                                error!("Error reading from {:?}: {}", addr, err);
                                 Err(err)
                             }
                         }
                     }
                     Err(err) => {
-                        error!("Error sending packet: {}", err);
                         Err(err)
                     }
                 }
             }
             Err(error) => {
-                error!("Could not connect to the server {:?}: {}", addr, error);
                 Err(error)
             }
         }
@@ -236,10 +243,20 @@ impl UtpSocket {
         buf: &[u8],
         addr: Option<SocketAddr>,
     ) -> io::Result<()> {
-        let peer_ref = self
-            .peers
-            .get(&addr.unwrap())
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "No peer connected"))?;
+
+        let (addr, peer_ref) =  if let Some(addr) = addr{
+            self.peers
+                .get(&addr)
+                .map(|peer| (Some(addr), Arc::clone(peer.value())))
+                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "No peer"))?
+        }else{
+            self.peers.
+                    iter().
+                    next().
+                    map(|peer| (Some(*peer.key()), Arc::clone(peer.value()))).
+                    ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "No peers"))?
+        };
+
 
         let mut peer = peer_ref.lock().await;
 
@@ -253,18 +270,19 @@ impl UtpSocket {
             packet.set_ack_nr(peer.ack_nr);
             packet.set_connection_id(self.id);
 
-            println!("--> chunk {:?}", packet.as_ref());
-
             peer.unsent_queue.push_back(packet);
 
             peer.seq_nr = peer.seq_nr.wrapping_add(1);
         }
 
         while let Some(mut packet) = peer.unsent_queue.pop_front() {
-            info!("Sending the packet {:?}", packet);
-            self.send_to(packet.as_ref(), addr.unwrap()).await.expect("Cannot send message");
+            match self.send_to(packet.as_ref(), addr.unwrap()).await{
+                Ok(_) => (),
+                Err(error) => {
+                    return Err(io::Error::new(io::ErrorKind::NetworkUnreachable, error).into());
+                }
+            }
         }
-
         Ok(())
     }
 
@@ -319,46 +337,38 @@ impl UtpSocket {
         let packet = match <Packet as packet::TryFrom<&[u8]>>::try_from(received_data) {
             Ok(packet) => packet,
             Err(e) => {
-                error!("Invalid packet from {}: {}", addr, e);
                 return Err(io::Error::new(io::ErrorKind::InvalidData, e.to_string()));
             }
         };
 
+        info!("Received packet is {:?}", packet);
+
         // Check if the peer exists in the `peers` DashMap
-        let peer_state = match self.peers.get(&addr) {
-            Some(state) => state,
-            None => {
-                // If the peer does not exist, handle it as a new connection
-                warn!("New peer connected: {}", addr);
-                return Err(io::Error::new(io::ErrorKind::NotFound, "No peer connected"));
-            }
-        };
+        let peer_state =  self.peers.entry(addr).or_insert_with( ||{
+            let new_state = Arc::new(Mutex::new(UtpSocketState::new(packet.connection_id())));
+            new_state
+        });
 
         // Lock the peer state for modification
         let mut state = peer_state.lock().await;
 
         // Add the received data to the peer's incoming buffer
         state.incoming_buffer.push_back(received_data.to_vec());
-        info!(
-            "Incoming buffer size: {} ({} bytes from {})",
-            state.incoming_buffer.len(),
-            len,
-            addr
-        );
-
-        // Process the incoming buffer
-        while let Some(data) = state.incoming_buffer.pop_front() {
-            info!("Processing {} bytes from {}", data.len(), addr);
-            if let Err(e) = self.sender.send(data).await {
-                error!("Failed to send data to stream: {}", e);
-            }
-        }
 
         // Handle the packet and send a response if needed
         if let Ok(Some(rsp)) = self.handle_packet(&packet, &mut state) {
             match self.udp.send_to(rsp.as_ref(), addr).await {
-                Ok(sent_len) => info!("Sent {} bytes in response", sent_len),
-                Err(e) => error!("Error sending packet: {}", e),
+                Ok(sent_len) => {
+                    // Process the incoming buffer
+                    while let Some(data) = state.incoming_buffer.pop_front() {
+                        if let Err(e) = self.sender.send(data).await {
+                            return Err(io::Error::new(io::ErrorKind::Other, e.to_string()));
+                        }
+                    }
+                },
+                Err(error) => {
+                    return Err(io::Error::new(io::ErrorKind::BrokenPipe, error.to_string()));
+                },
             }
         }
 
@@ -389,7 +399,6 @@ impl UtpSocket {
         debug!("({:?}, {:?})", peer.state, packet.get_type());
 
         //Now this response shall depend on the socket state and packet type
-
         match (peer.state, packet.get_type()) {
             //if the socket is just started and I am getting a connection request
             (SocketState::New, PacketType::Syn) => self.handle_new_state(packet, peer),
@@ -506,13 +515,12 @@ impl UtpSocket {
 
     ///when new connection is established
     fn handle_new_state(&self, packet: &Packet, peer: &mut UtpSocketState) -> io::Result<Option<Packet>> {
-        //this means our socket state is new and it only accepts connection requestion
+        //this means our socket state is new, and it only accepts connection request
         peer.ack_nr = packet.ack_nr();
         peer.seq_nr = 0;
         peer.sender_id = self.id;
         peer.state = SocketState::Connected;
         peer.last_dropped = peer.ack_nr;
-
         Ok(Some(self.prepare_reply(packet, PacketType::State, peer)))
     }
 
@@ -527,7 +535,6 @@ impl UtpSocket {
         resp.set_connection_id(peer.sender_id);
         resp.set_seq_nr(peer.seq_nr);
         resp.set_ack_nr(peer.ack_nr);
-
         resp
     }
 }

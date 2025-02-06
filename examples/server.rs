@@ -66,10 +66,5 @@ async fn main() {
         if len == 0 {
             break; // Exit if the connection closes
         }
-        info!(
-            "Received {} bytes: {:?}",
-            len,
-            String::from_utf8_lossy(&buf[..len])
-        );
     }
 }

@@ -416,6 +416,7 @@ impl fmt::Debug for Packet {
             .field("wnd_size", &self.wnd_size())
             .field("seq_nr", &self.seq_nr())
             .field("ack_nr", &self.ack_nr())
+            .field("data", &self.payload())
             .finish()
     }
 }

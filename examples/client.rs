@@ -46,7 +46,7 @@ fn colored_level(level: Level) -> String {
     }
 }
 #[tokio::main]
-async fn main() {
+async fn main() -> io::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
         error!("Usage: client <port>");
@@ -59,24 +59,12 @@ async fn main() {
     let server_addr = SocketAddr::from_str("127.0.0.1:8080").unwrap();
 
     let mut client_stream = UtpStream::bind(Some(client_addr)).await;
-    match client_stream.connect(server_addr).await {
-        Ok(_) => info!("Connected to {}", server_addr),
-        Err(error) => {
-            error!("Error: {}", error);
-            return;
-        }
-    }
+    client_stream.connect(server_addr).await?;
 
     let stdin = io::stdin();
     let mut reader = BufReader::new(stdin).lines();
     while let Ok(Some(message)) = reader.next_line().await {
-        info!("Client write");
-        match client_stream.write_all(message.as_bytes()).await {
-            Ok(_) => info!("Sent: {}", message),
-            Err(error) => {
-                info!("Error writing: {}", error);
-                break;
-            }
-        }
+        client_stream.write_all(message.as_bytes()).await?
     }
+    Ok(())
 }

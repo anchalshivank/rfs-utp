@@ -1,6 +1,6 @@
 use crate::socket::UtpSocket;
 use futures::AsyncWrite;
-use log::info;
+use futures::Future;
 use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
@@ -8,7 +8,6 @@ use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, Interest, ReadBuf, Ready};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Receiver;
-use futures::Future;
 //Wrapper over UtpStream
 pub struct UtpStream {
     socket: UtpSocket,
@@ -19,8 +18,6 @@ impl UtpStream {
     pub async fn bind(addr: Option<SocketAddr>) -> UtpStream {
         let (sender, receiver) = mpsc::channel(100);
         let socket = UtpSocket::bind(addr, Some(sender)).await;
-        let r = socket.clone();
-        info!("in binding");
         let r = socket.clone();
 
         tokio::spawn(async move {
@@ -49,7 +46,6 @@ impl AsyncRead for UtpStream {
             Poll::Ready(Some(data)) => {
                 let amt = std::cmp::min(buf.remaining(), data.len());
                 buf.put_slice(&data[..amt]);
-                info!("received data {:?} ", String::from_utf8_lossy(buf.filled()));
                 Poll::Ready(Ok(()))
             }
             Poll::Ready(None) => Poll::Ready(Ok(())),

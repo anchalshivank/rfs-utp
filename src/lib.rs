@@ -1,3 +1,5 @@
+#![allow(warnings)]
+
 pub mod bit_iterator;
 pub mod congestion_control;
 pub mod error;

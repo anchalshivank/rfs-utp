@@ -48,6 +48,7 @@ pub enum PacketType {
     State, // signals acknowledgment of a packet
     Reset, // forcibly terminates a connection
     Syn,   // initiates a new connection with a peer
+    Ack,   // Explicit acknowledgement of received packets
 }
 
 impl TryFrom<u8> for PacketType {
@@ -59,6 +60,7 @@ impl TryFrom<u8> for PacketType {
             2 => Ok(PacketType::State),
             3 => Ok(PacketType::Reset),
             4 => Ok(PacketType::Syn),
+            5 => Ok(PacketType::Ack),
             n => Err(ParseError::InvalidPacketType(n)),
         }
     }
@@ -72,6 +74,7 @@ impl From<PacketType> for u8 {
             PacketType::State => 2,
             PacketType::Reset => 3,
             PacketType::Syn => 4,
+            PacketType::Ack => 5,
         }
     }
 }
@@ -369,6 +372,26 @@ impl Packet {
         }
     }
 
+    pub fn get_sack(&self) -> Option<Vec<u8>>{
+
+        let mut index = HEADER_SIZE;
+        let mut extension_type = ExtensionType::from(self.0[1]); // First extension type
+
+        while index < self.0.len() && extension_type != ExtensionType::None {
+            let ext_len = self.0[index + 1] as usize;
+            if extension_type == ExtensionType::SelectiveAck {
+                return Some(self.0[index + 2..index + 2 + ext_len].to_vec());
+            }
+            index += ext_len + 2;
+            extension_type = ExtensionType::from(self.0.get(index).copied().unwrap_or(0));
+
+        }
+
+        None
+
+
+    }
+
     pub fn len(&self) -> usize {
         self.0.len()
     }
@@ -519,7 +542,7 @@ mod tests {
             0x21, 0x00, 0x41, 0xa8, 0x99, 0x2f, 0xd0, 0x2a, 0x9f, 0x4a, 0x26, 0x21, 0x00, 0x10,
             0x00, 0x00, 0x3a, 0xf2, 0x6c, 0x79,
         ];
-        let packet = Packet::try_from(&buf);
+        let packet = <packet::Packet as packet::TryFrom<&[u8]>>::try_from(&buf);
         assert!(packet.is_ok());
         let packet = packet.unwrap();
         assert_eq!(packet.get_version(), 1);
@@ -541,7 +564,7 @@ mod tests {
             0x21, 0x01, 0x41, 0xa7, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             0x05, 0xdc, 0xab, 0x53, 0x3a, 0xf5, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00,
         ];
-        let packet = Packet::try_from(&buf);
+        let packet = <packet::Packet as packet::TryFrom<&[u8]>>::try_from(&buf);
         assert!(packet.is_ok());
         let packet = packet.unwrap();
         assert_eq!(packet.get_version(), 1);
@@ -571,7 +594,7 @@ mod tests {
             0x21, 0x01, 0x41, 0xa8, 0x99, 0x2f, 0xd0, 0x2a, 0x9f, 0x4a, 0x26, 0x21, 0x00, 0x10,
             0x00, 0x00, 0x3a, 0xf2, 0x6c, 0x79,
         ];
-        let packet = Packet::try_from(&buf);
+        let packet = <packet::Packet as packet::TryFrom<&[u8]>>::try_from(&buf);
         assert!(packet.is_err());
     }
 
@@ -581,7 +604,7 @@ mod tests {
             0x21, 0x01, 0x41, 0xa8, 0x99, 0x2f, 0xd0, 0x2a, 0x9f, 0x4a, 0x26, 0x21, 0x00, 0x10,
             0x00, 0x00, 0x3a, 0xf2, 0x6c, 0x79, 0x00, 0x04, 0x00,
         ];
-        let packet = Packet::try_from(&buf);
+        let packet = <packet::Packet as packet::TryFrom<&[u8]>>::try_from(&buf);
         assert!(packet.is_err());
     }
 
@@ -593,7 +616,7 @@ mod tests {
             0x00, // Imaginary extension
             0x00, 0x04, 0x00, 0x00, 0x00, 0x00,
         ];
-        match Packet::try_from(&buf) {
+        match <packet::Packet as packet::TryFrom<&[u8]>>::try_from(&buf) {
             Ok(packet) => {
                 assert_eq!(packet.get_version(), 1);
                 assert_eq!(packet.get_extension_type(), ExtensionType::SelectiveAck);
@@ -736,7 +759,8 @@ mod tests {
             0x01, 0x00, 0x41, 0xa8, 0x00, 0xe9, 0x03, 0x89, 0x65, 0xbf, 0x5d, 0xba, 0x00, 0x10,
             0x00, 0x00, 0x3a, 0xf2, 0x42, 0xc8, 0x48, 0x65, 0x6c, 0x6c, 0x6f, 0x0a,
         ];
-        assert_eq!(&Packet::try_from(&buf).unwrap().as_ref(), &buf);
+        let packet = <packet::Packet as packet::TryFrom<&[u8]>>::try_from(&buf);
+        assert_eq!(&packet.unwrap().as_ref(), &buf);
     }
 
     #[test]
@@ -744,13 +768,13 @@ mod tests {
         let buf = [
             0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         ];
-        let packet = Packet::try_from(&buf);
+        let packet = <packet::Packet as packet::TryFrom<&[u8]>>::try_from(&buf);
         assert!(packet.is_err());
     }
 
     #[test]
     fn test_decode_empty_packet() {
-        let packet = Packet::try_from(&[]);
+        let packet = <packet::Packet as packet::TryFrom<&[u8]>>::try_from(&[]);
         assert!(packet.is_err());
     }
 
@@ -758,9 +782,9 @@ mod tests {
     #[test]
     fn quicktest() {
         fn run(x: Vec<u8>) -> TestResult {
-            let packet = Packet::try_from(&x);
+            let packet = <packet::Packet as packet::TryFrom<&[u8]>>::try_from(&x);
 
-            if PacketHeader::try_from(&x)
+            if <PacketHeader as packet::TryFrom<&[u8]>>::try_from(&x)
                 .and(check_extensions(&x))
                 .is_err()
             {
@@ -782,14 +806,14 @@ mod tests {
             0x21, 0x00, 0x41, 0xa8, 0x99, 0x2f, 0xd0, 0x2a, 0x9f, 0x4a, 0x26, 0x21, 0x00, 0x10,
             0x00, 0x00, 0x3a, 0xf2, 0x6c, 0x79,
         ];
-        let packet = Packet::try_from(&buf).unwrap();
+        let packet = <packet::Packet as packet::TryFrom<&[u8]>>::try_from(&buf).unwrap();
         assert_eq!(packet.extensions().count(), 0);
 
         let buf = [
             0x21, 0x01, 0x41, 0xa7, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             0x05, 0xdc, 0xab, 0x53, 0x3a, 0xf5, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00,
         ];
-        let packet = Packet::try_from(&buf).unwrap();
+        let packet = <packet::Packet as packet::TryFrom<&[u8]>>::try_from(&buf).unwrap();
         let extensions: Vec<Extension<'_>> = packet.extensions().collect();
         assert_eq!(extensions.len(), 1);
         assert_eq!(extensions[0].ty, ExtensionType::SelectiveAck);
@@ -804,7 +828,7 @@ mod tests {
             0x00, 0x04, 0x05, 0x06, 0x07, 0x08,
         ];
 
-        let packet = Packet::try_from(&buf).unwrap();
+        let packet = <packet::Packet as packet::TryFrom<&[u8]>>::try_from(&buf).unwrap();
         let extensions: Vec<Extension<'_>> = packet.extensions().collect();
         assert_eq!(extensions.len(), 2);
         assert_eq!(extensions[0].ty, ExtensionType::SelectiveAck);

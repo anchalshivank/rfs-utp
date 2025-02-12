@@ -8,10 +8,12 @@ use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, Interest, ReadBuf, Ready};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Receiver;
+use crate::packet::Packet;
+
 //Wrapper over UtpStream
 pub struct UtpStream {
     socket: UtpSocket,
-    receiver: Receiver<Vec<u8>>,
+    receiver: Receiver<Packet>,
 }
 
 impl UtpStream {
@@ -21,7 +23,7 @@ impl UtpStream {
         let r = socket.clone();
 
         tokio::spawn(async move {
-            r.start_receiving().await;
+            let _ = r.start_receiving().await;
         });
         Self { socket, receiver }
     }
@@ -45,7 +47,7 @@ impl AsyncRead for UtpStream {
         match this.receiver.poll_recv(cx) {
             Poll::Ready(Some(data)) => {
                 let amt = std::cmp::min(buf.remaining(), data.len());
-                buf.put_slice(&data[..amt]);
+                buf.put_slice(&data.as_ref()[..amt]);
                 Poll::Ready(Ok(()))
             }
             Poll::Ready(None) => Poll::Ready(Ok(())),

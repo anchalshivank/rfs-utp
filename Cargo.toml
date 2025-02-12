@@ -17,3 +17,6 @@ rand = "0.8.5"
 futures-util = "0.3.31"
 dashmap = "6.1.0"
 uuid = { version = "1.13.1", features = ["v4"] }
+
+[workspace]
+rustflags = ["-Awarnings"]

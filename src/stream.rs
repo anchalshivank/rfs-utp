@@ -1,3 +1,4 @@
+use crate::packet::Packet;
 use crate::socket::UtpSocket;
 use futures::AsyncWrite;
 use futures::Future;
@@ -8,7 +9,6 @@ use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, Interest, ReadBuf, Ready};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Receiver;
-use crate::packet::Packet;
 
 //Wrapper over UtpStream
 pub struct UtpStream {

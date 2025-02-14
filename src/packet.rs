@@ -4,8 +4,8 @@ use crate::bit_iterator::BitIterator;
 use crate::error::ParseError;
 use crate::packet;
 use crate::time::{Delay, Timestamp};
-use std::fmt;
 use log::info;
+use std::fmt;
 use tokio::io::ReadBuf;
 
 pub const HEADER_SIZE: usize = 20;
@@ -375,8 +375,7 @@ impl Packet {
         info!("setting up extension with extension end {}", self.0.len());
     }
 
-    pub fn get_sack(&self) -> Option<Vec<u8>>{
-
+    pub fn get_sack(&self) -> Option<Vec<u8>> {
         let mut index = HEADER_SIZE;
         let mut extension_type = ExtensionType::from(self.0[1]); // First extension type
 
@@ -387,12 +386,9 @@ impl Packet {
             }
             index += ext_len + 2;
             extension_type = ExtensionType::from(self.0.get(index).copied().unwrap_or(0));
-
         }
 
         None
-
-
     }
 
     pub fn len(&self) -> usize {
@@ -499,10 +495,7 @@ fn check_extensions(data: &[u8]) -> Result<(), ParseError> {
     let mut index = HEADER_SIZE;
     let mut extension_type = ExtensionType::from(data[1]);
 
-    info!("extension tyope is {:?}", extension_type);
-    info!("data len is {}", data.len());
     if data.len() == HEADER_SIZE && extension_type != ExtensionType::None {
-        info!("1");
         return Err(ParseError::InvalidExtensionLength);
     }
 
@@ -520,9 +513,7 @@ fn check_extensions(data: &[u8]) -> Result<(), ParseError> {
         // - multiple of 4,
         // - does not exceed packet length
 
-        info!("extension len {}, extension_end {} , data.len {}", len, extension_end, data.len());
         if len == 0 || len % 4 != 0 || extension_end > data.len() {
-            info!("2");
             return Err(ParseError::InvalidExtensionLength);
         }
 
@@ -531,7 +522,6 @@ fn check_extensions(data: &[u8]) -> Result<(), ParseError> {
     }
     // Check for pending extensions (early exit of previous loop)
     if extension_type != ExtensionType::None {
-        info!("3");
         return Err(ParseError::InvalidPacketLength);
     }
 

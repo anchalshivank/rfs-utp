@@ -46,7 +46,7 @@ pub fn generate_u16_from_uuid_v4() -> u16 {
 
     // Extract the first 2 bytes of the UUID and convert them to a u16
     let bytes = uuid.as_bytes();
-    let u16_id = u16::from_be_bytes([bytes[0], bytes[1]]);  // Use the first two bytes
+    let u16_id = u16::from_be_bytes([bytes[0], bytes[1]]); // Use the first two bytes
 
     u16_id
 }

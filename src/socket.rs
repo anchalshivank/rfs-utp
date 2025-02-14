@@ -6,6 +6,7 @@ use crate::time::{now_microseconds, Delay, Timestamp};
 use crate::util::{abs_diff, generate_sequential_identifiers, generate_u16_from_uuid_v4};
 use dashmap::DashMap;
 use log::{debug, error, info, warn};
+use rand::Rng;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::hash::Hash;
@@ -15,7 +16,6 @@ use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use rand::Rng;
 use tokio::io::{Interest, ReadBuf, Ready};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -73,7 +73,7 @@ pub struct UtpSocketState {
     pub cwnd: u32,
     pub max_retransmission_retries: u32,
     pub incoming_buffer: VecDeque<Packet>,
-    pub sent_window: BTreeMap<u16, Packet>,           // Mutable data -> I think this shall be a HashSet
+    pub sent_window: BTreeMap<u16, Packet>, // Mutable data -> I think this shall be a HashSet
     pub unsent_queue: VecDeque<Packet>,     // I think this is required
     pub remote_wnd_size: u32,
     pub base_delays: VecDeque<Delay>, // Mutable data
@@ -83,7 +83,7 @@ pub struct UtpSocketState {
     pub congestion_timeout: u64,
     pub connected_to: Option<SocketAddr>,
     pub sender_id: u16,
-    pub out_of_order: BTreeMap<u16, Packet>
+    pub out_of_order: BTreeMap<u16, Packet>,
 }
 
 impl UtpSocketState {
@@ -111,7 +111,7 @@ impl UtpSocketState {
             congestion_timeout: INITIAL_CONGESTION_TIMEOUT,
             connected_to: None,
             sender_id,
-            out_of_order: BTreeMap::new()
+            out_of_order: BTreeMap::new(),
         }
     }
 }
@@ -122,7 +122,7 @@ pub struct UtpSocket {
     sender: Sender<Packet>,
     id: u16,
     drop: bool,
-    client: bool
+    client: bool,
 }
 
 impl Clone for UtpSocket {
@@ -133,13 +133,18 @@ impl Clone for UtpSocket {
             sender: self.sender.clone(),
             id: self.id.clone(),
             drop: self.drop.clone(),
-            client: self.client.clone()
+            client: self.client.clone(),
         }
     }
 }
 
 impl UtpSocket {
-    pub async fn bind(addr: Option<SocketAddr>, sender: Option<Sender<Packet>>, drop: bool, client: bool) -> Self {
+    pub async fn bind(
+        addr: Option<SocketAddr>,
+        sender: Option<Sender<Packet>>,
+        drop: bool,
+        client: bool,
+    ) -> Self {
         let addr = addr.unwrap_or_else(|| SocketAddr::from_str("127.0.0.1:0").unwrap());
         let udp = Arc::new(UdpSocket::bind(addr).await.unwrap());
         let id = generate_u16_from_uuid_v4();
@@ -152,22 +157,21 @@ impl UtpSocket {
             sender: sender.unwrap(),
             id,
             drop,
-            client
+            client,
         }
     }
 
     pub async fn start_receiving(&self) -> io::Result<()> {
-        info!("Start receiving the task");
+        // info!("Start receiving the task");
 
         let mut buf = [0; 26];
 
         loop {
             // Handle the result of recv_packets_from
-            info!("------------------------------------------------");
+            // info!("------------------------------------------------");
             self.recv_packets_from(&mut buf).await?;
         }
     }
-
 
     pub async fn connect(&mut self, addr: SocketAddr) -> io::Result<()> {
         // Check if the peer is already connected
@@ -193,7 +197,9 @@ impl UtpSocket {
             locked_peer_state.state = SocketState::SynSent;
             // Connect to the remote address
             locked_peer_state.connected_to = Some(addr);
-            locked_peer_state.sent_window.insert(packet.seq_nr(), packet.clone());
+            locked_peer_state
+                .sent_window
+                .insert(packet.seq_nr(), packet.clone());
 
             info!("({:?}, {:?})", locked_peer_state.state, packet.get_type());
         }
@@ -202,7 +208,6 @@ impl UtpSocket {
         self.udp.connect(&addr).await?;
 
         self.send(packet.as_ref()).await?;
-
 
         //now we must have retry mechanism
 
@@ -242,27 +247,19 @@ impl UtpSocket {
     }
 
     /// This is done from client side ... and we need to also receive the acknowledgement ... os I think there shall also be a recv thing open
-    pub async fn send_packets(
-        &mut self,
-        buf: &[u8],
-        addr: Option<SocketAddr>,
-    ) -> io::Result<()> {
-
-
-
-        let (addr, peer_ref) =  if let Some(addr) = addr{
+    pub async fn send_packets(&mut self, buf: &[u8], addr: Option<SocketAddr>) -> io::Result<()> {
+        let (addr, peer_ref) = if let Some(addr) = addr {
             self.peers
                 .get(&addr)
                 .map(|peer| (Some(addr), Arc::clone(peer.value())))
                 .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "No peer"))?
-        }else{
-            self.peers.
-                    iter().
-                    next().
-                    map(|peer| (Some(*peer.key()), Arc::clone(peer.value()))).
-                    ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "No peers"))?
+        } else {
+            self.peers
+                .iter()
+                .next()
+                .map(|peer| (Some(*peer.key()), Arc::clone(peer.value())))
+                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "No peers"))?
         };
-
 
         let mut peer = peer_ref.lock().await;
 
@@ -283,14 +280,15 @@ impl UtpSocket {
 
         let mut it = peer.sent_window.iter();
 
-
         while let Some((_, packet)) = it.next() {
-            if self.client{
-
-                info!(">>>>>>>>>>>>>>Sending packet with seq_nr {}", packet.seq_nr());
+            if self.client {
+                // info!(
+                //     ">>>>>>>>>>>>>>Sending packet with seq_nr {}",
+                //     packet.seq_nr()
+                // );
             }
 
-            match self.send_to(packet.as_ref(), addr.unwrap()).await{
+            match self.send_to(packet.as_ref(), addr.unwrap()).await {
                 Ok(_) => (),
                 Err(error) => {
                     return Err(io::Error::new(io::ErrorKind::NetworkUnreachable, error).into());
@@ -322,14 +320,15 @@ impl UtpSocket {
     }
 
     pub async fn recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
-        match self.udp.recv_from(buf).await{
+        match self.udp.recv_from(buf).await {
             Ok((len, addr)) => {
-                info!("Got somethign -------- {} {:?}", len, addr);
 
                 Ok((len, addr))
             }
-            Err(err) => {error!("{:?}", err);
-            Err(err)}
+            Err(err) => {
+                error!("{:?}", err);
+                Err(err)
+            }
         }
     }
 
@@ -351,39 +350,30 @@ impl UtpSocket {
     }
 
     pub async fn recv_packets_from(&self, buf: &mut [u8]) -> io::Result<SocketAddr> {
-
-        info!("Receiving >>>>>>");
+        // info!("Receiving >>>>>>");
 
         // Receive data from the UDP socket
         let (len, addr) = self.recv_from(buf).await?;
-        info!("Got somethign 2-------- {} {:?}", len, addr);
 
         let received_data = &buf[..len];
 
-
         //here we can add the logic of packet loss
-
-
 
         // Try to parse the received data into a packet
         let packet = Self::to_packet(received_data).map_err(|err| {
-            error!("got this error {:?}", err);
+            // error!("got this error {:?}", err);
             io::Error::new(io::ErrorKind::InvalidData, err)
         })?;
 
 
-        info!("got this packet {:?}", packet.get_type());
-
-
-        if self.drop && packet.seq_nr() !=1 {
+        if self.drop && packet.seq_nr() != 1 {
             if rand::thread_rng().gen_bool(0.6) {
                 info!("Dropping packet from {} (Simulated packet loss) and it's sequence number is {}", addr, packet.seq_nr());
                 return Ok(addr);
             }
         }
 
-
-        let peer_state =  self.peers.entry(addr).or_insert_with( ||{
+        let peer_state = self.peers.entry(addr).or_insert_with(|| {
             //this is the new state ... this might be a new connection request
 
             let mut utp_socket_state = UtpSocketState::new(packet.connection_id());
@@ -393,40 +383,42 @@ impl UtpSocket {
             new_state
         });
 
-
         // Lock the peer state for modification
         let mut state = peer_state.lock().await;
 
-        if !self.client{
-
-
-            info!("<<<<<<<<<<<<Receiving  packet (seq_nr {}, last_ack {})", packet.seq_nr(), state.last_acked);
-
-
-        }else{
-
-            info!("<<<<<<<<<<<<Receiving  packet (seq_nr {},  ack_nr  {})", packet.seq_nr(), packet.ack_nr());
-
-
+        if !self.client {
+            // info!(
+            //     "<<<<<<<<<<<<Receiving  packet (seq_nr {}, last_ack {})",
+            //     packet.seq_nr(),
+            //     state.last_acked
+            // );
+        } else {
+            // info!(
+            //     "<<<<<<<<<<<<Receiving  packet (seq_nr {},  ack_nr  {})",
+            //     packet.seq_nr(),
+            //     packet.ack_nr()
+            // );
         }
         // Add the received data to the peer's incoming buffer
 
         let packet = <Packet as packet::TryFrom<&[u8]>>::try_from(buf)?;
 
-
-        state.incoming_buffer.push_back(packet.clone());
-
         // Handle the packet and send a response if needed
-        if let Ok(Some(rsp)) = self.handle_packet(&packet, &mut state) {
+        if let Ok(Some(rsp)) = self.handle_packet(&packet, &mut state).await {
             //sender cares about the last_ack ...
-            info!(">>>>>>>>>>>>> Returning packet with seq_nr {} , ack_nr {}", rsp.seq_nr(), rsp.ack_nr());
+            // info!(
+            //     ">>>>>>>>>>>>> Returning packet with seq_nr {} , ack_nr {}",
+            //     rsp.seq_nr(),
+            //     rsp.ack_nr()
+            // );
             // info!("sending packet with extension_end {}", rsp.ex);
             match self.send_to(rsp.as_ref(), addr).await {
                 Ok(_) => {
-                },
+                    // state.incoming_buffer.push_back(packet.clone());
+                }
                 Err(error) => {
                     return Err(io::Error::new(io::ErrorKind::BrokenPipe, error.to_string()));
-                },
+                }
             }
         }
 
@@ -452,24 +444,39 @@ impl UtpSocket {
         self.udp.peer_addr()
     }
 
-    fn handle_packet(&self, packet: &Packet, peer: &mut UtpSocketState) -> io::Result<Option<Packet>> {
+    async fn handle_packet(
+        &self,
+        packet: &Packet,
+        peer: &mut UtpSocketState,
+    ) -> io::Result<Option<Packet>> {
         //receiver only takes care of the ack_nr -> how many it has acknowledged and seq_nr
 
-        info!("Current state is [{:?} {:?}]", packet.get_type(), peer.state);
-
+        info!(
+            "Current state is [{:?} {:?}]",
+            packet.get_type(),
+            peer.state
+        );
 
         let p = match (peer.state, packet.get_type()) {
             // Handling a new connection request (SYN packet received in the New state)
             (SocketState::New, PacketType::Syn) => {
                 peer.last_acked = packet.seq_nr(); // Acknowledge the SYN
                 peer.state = SocketState::Connected; // Transition to Connected state
-                Ok(Some(self.prepare_reply(packet, PacketType::State, packet.seq_nr(), packet.seq_nr())))
+                Ok(Some(self.prepare_reply(
+                    packet,
+                    PacketType::State,
+                    packet.seq_nr(),
+                    packet.seq_nr(),
+                )))
             }
 
             // Unexpected SYN received in any state -> Send a Reset packet
-            (_, PacketType::Syn) => {
-                Ok(Some(self.prepare_reply(packet, PacketType::Reset, packet.seq_nr(), packet.seq_nr())))
-            }
+            (_, PacketType::Syn) => Ok(Some(self.prepare_reply(
+                packet,
+                PacketType::Reset,
+                packet.seq_nr(),
+                packet.seq_nr(),
+            ))),
 
             // Handling an ACK for a previously sent SYN (client transitions to Connected state)
             (SocketState::SynSent, PacketType::State) => {
@@ -482,7 +489,6 @@ impl UtpSocket {
                 Ok(None) // No immediate response required
             }
 
-
             // it is confirmed we are waiting on sender side as it waits for acknowledgement
             (SocketState::Connected, PacketType::Ack) | (SocketState::FinSent, PacketType::Ack) => {
                 let mut reply = None;
@@ -494,46 +500,55 @@ impl UtpSocket {
                 if packet.ack_nr() == peer.last_acked {
                     //means packet.ack_nr() + 1 has not been received
                     //duplicate Ack detected
-                    info!("duplicate found");
-                    peer.duplicate_ack_count +=1;
-
-
-                }else if packet.ack_nr() == peer.last_acked+1{
-                    info!("------------------------>>>");
+                    // info!("duplicate found");
+                    peer.duplicate_ack_count += 1;
+                } else if packet.ack_nr() == peer.last_acked + 1 {
                     peer.last_acked = packet.ack_nr();
                     peer.last_acked_timestamp = now_microseconds();
                     peer.duplicate_ack_count = 1;
                     peer.sent_window.remove(&packet.ack_nr());
-
+                    info!("Packet with seq_nr {}  acked ", packet.ack_nr());
                 }
 
-                if peer.duplicate_ack_count >=3 {
-                    //we need to send that packet back
-                    let packet = peer.sent_window.get(&(packet.ack_nr() +1)).unwrap().clone();
-                    reply = Some(packet);
 
+                if peer.duplicate_ack_count >= 3 {
+                    // Check if the packet exists in the sent_window
+                    if let Some(lost_packet) = peer.sent_window.get(&(packet.ack_nr() + 1)) {
+                        // info!("Fast retransmitting packet with seq_nr {}", packet.ack_nr() + 1);
+                        reply = Some(lost_packet.clone());
+                    } else {
+                        // Log an error or handle the case where the packet is not found
+                        // warn!("Packet with seq_nr {} not found in sent_window", packet.ack_nr() + 1);
+                    }
                 }
 
                 // we can check if this acknowledgement packet is sack?
 
-                if packet.get_extension_type() == ExtensionType::SelectiveAck {
+                let lost_packets = self.get_lost_seq_nr(packet, peer);
+                // info!("Lost packets are {:?}", lost_packets);
 
-                    //we need to resend this packet
 
-                    if let Some(sack) = packet.get_sack(){
-                        let lost_packets = self.get_lost_seq_nr(sack, packet.ack_nr(), peer.seq_nr);
-                        info!("Lost packets are {:?}", lost_packets);
+                //and we need to resend these lost packets
+
+                for seq_nr in lost_packets{
+                    if let Some(packet) = peer.sent_window.get(&seq_nr){
+
+                       self.send_to(packet.as_ref(), peer.connected_to.unwrap()).await?;
 
                     }
                 }
 
+                let b = peer.sent_window.iter().map(|p| *p.0).collect::<Vec<_>>();
 
-                info!("On client side last_ack is {}", peer.last_acked);
+                info!("Sent window {:?}", b);
+
+                // info!("On client side last_ack is {}", peer.last_acked);
                 Ok(reply)
             }
 
             // it is confirmed that we are on receiver side . as only receiver will receive data ... even incase the sender is sending data .. the packetType will cahnge to Data.. it works universally
-            (SocketState::Connected, PacketType::Data) | (SocketState::FinSent, PacketType::Data) => {
+            (SocketState::Connected, PacketType::Data)
+            | (SocketState::FinSent, PacketType::Data) => {
                 // Determine the appropriate reply type (State packet normally, but Fin if in FinSent state)
                 let expected_packet_type = if peer.state == SocketState::FinSent {
                     PacketType::Fin
@@ -547,41 +562,45 @@ impl UtpSocket {
                 //last_ack nr means the last continuous acknowledged number means ... if it is 5 it means all the packet until 5 has been acknowledged
                 let mut sack = Vec::new();
                 if packet.seq_nr() == peer.last_acked + 1 {
-
                     peer.last_acked = packet.seq_nr();
-                    peer.seq_nr +=1;
+                    peer.seq_nr += 1;
 
+                    peer.incoming_buffer.push_back(packet.clone());
+                    // info!("Packet with seq_nr {}  received ", packet.seq_nr());
 
                     let mut it = peer.out_of_order.iter();
                     let mut seq_nr_to_remove = Vec::new();
-                    while let Some((&seq, _)) = it.next(){
-
-
-                        if seq == peer.last_acked + 1   {
-
-
+                    while let Some((&seq, p)) = it.next() {
+                        if seq == peer.last_acked + 1 {
+                            peer.incoming_buffer.push_back(p.clone());
+                            // info!("Packet with seq_nr {}  received ", seq_nr_to_remove.len());
                             peer.last_acked = seq;
                             seq_nr_to_remove.push(seq);
-
-                        }else {
+                        } else {
                             break;
                         }
-
                     }
                     // eprintln!("Final last ack is {}", peer.last_acked);
                     for seq in seq_nr_to_remove {
                         peer.out_of_order.remove(&seq);
                     }
 
-                    info!("correct and last ack is {}", peer.last_acked);
+                    let a = peer.incoming_buffer.iter().map(|packet| packet.seq_nr()).collect::<Vec<_>>();
+                    let ofo = peer.incoming_buffer.iter().map(|packet| packet.seq_nr()).collect::<Vec<_>>();
+
+                    info!("Incoming buffer {:?}", a);
+                    info!("out of order buffer {:?}", ofo);
 
 
                     //as soon as we receive the expected packet we shall pop the top most packet if it is next in order to be acknowledged
-
                 }
                 // Detect packet loss: If received packet is ahead of expected sequence number
-                else if packet.seq_nr()  > peer.last_acked {
-                    info!("Packet loss detected! Current ack_nr ({}) is behind packet seq_nr ({})", peer.last_acked, packet.seq_nr());
+                else if packet.seq_nr() > peer.last_acked {
+                    info!(
+                        "Packet loss detected! Current ack_nr ({}) is behind packet seq_nr ({})",
+                        peer.last_acked,
+                        packet.seq_nr()
+                    );
 
                     //Now we will also keep a buffer of out of order packet that have been acknowledged
                     // for eg we were expecting 4 ... but we got 5,6,7
@@ -592,26 +611,18 @@ impl UtpSocket {
                     peer.out_of_order.insert(packet.seq_nr(), packet.clone());
                     //reply.set_ack_nr(peer.last_acked); //I think this is not required as sender will know that it has to send the duplicate packet
                     //we know the packet has been lost
+
                     sack = self.build_selective_ack(peer);
-
-
-                }else{
-
+                } else {
                     //this is the case ... in which I got a packet ... that has already been acknowledged
                     //it shall never happen but ... in case it happens we ignore the packet
-                    info!("You are fucked");
-
-
                 }
 
-                info!("Peer last_ack is {}", peer.last_acked);
-                let mut reply = self.prepare_reply(packet, PacketType::Ack, peer.seq_nr, peer.last_acked);
-                if sack.len()!=0{
-                    info!("Sack is {:?}", sack);
+                let mut reply =
+                    self.prepare_reply(packet, PacketType::Ack, peer.seq_nr, peer.last_acked);
+                if sack.len() != 0 {
                     reply.set_sack(sack);
-
                 }
-                info!("---->>>> seq_nr {}, ack_nr {}", peer.seq_nr, reply.ack_nr());
                 Ok(Some(reply))
             }
 
@@ -628,14 +639,19 @@ impl UtpSocket {
                 }
 
                 // Fast retransmit: If three duplicate ACKs are received, assume packet loss
-                let packet_loss_detected = !peer.sent_window.is_empty() || peer.duplicate_ack_count == 3 ;
+                let packet_loss_detected =
+                    !peer.sent_window.is_empty() || peer.duplicate_ack_count == 3;
 
                 let mut reply = None;
 
                 if packet_loss_detected {
                     // TODO: Identify and retransmit the lost packet
                     //Oh,  as this is the receiver side ... we shall only
-                    let packet  = peer.sent_window.get(&(packet.ack_nr() - 1)).unwrap().clone();
+                    let packet = peer
+                        .sent_window
+                        .get(&(packet.ack_nr() - 1))
+                        .unwrap()
+                        .clone();
                     reply = Some(packet);
                 }
                 Ok(reply) // No response required immediately
@@ -651,7 +667,8 @@ impl UtpSocket {
 
                 // If we are waiting for SACK, should we close the socket immediately?
                 // Closing while waiting for SACK might cause data loss.
-                let reply = self.prepare_reply(packet, PacketType::State, packet.seq_nr(), packet.seq_nr());
+                let reply =
+                    self.prepare_reply(packet, PacketType::State, packet.seq_nr(), packet.seq_nr());
                 peer.state = SocketState::Closed; // Transition to Closed state
                 Ok(Some(reply))
             }
@@ -677,8 +694,6 @@ impl UtpSocket {
         let mut max_byte_index = 0;
 
         for (seq_nr, packet) in &peer.out_of_order {
-
-
             if *seq_nr > peer.last_acked {
                 let diff = (seq_nr - peer.last_acked) as usize - 1;
                 let byte = diff / 8;
@@ -693,8 +708,6 @@ impl UtpSocket {
                 sack[byte] |= 1 << bit;
 
                 // eprintln!("{:08b}", sack[byte]);
-
-
             }
         }
 
@@ -705,14 +718,11 @@ impl UtpSocket {
         sack
     }
 
-
     pub async fn ready(&self, interest: Interest) -> io::Result<Ready> {
         self.udp.ready(interest).await
     }
 
-
     fn prepare_reply(&self, packet: &Packet, t: PacketType, seq_nr: u16, ack_nr: u16) -> Packet {
-        info!("ack_nr foubnd is {}", ack_nr);
         let mut resp = Packet::new();
         resp.set_type(t);
         let self_t_micro = now_microseconds();
@@ -724,50 +734,72 @@ impl UtpSocket {
         resp.set_connection_id(self.id);
         resp.set_seq_nr(seq_nr);
         resp.set_ack_nr(ack_nr);
-        info!("ack_nr input is {} , packet ack_nr is {}",ack_nr ,resp.ack_nr());
+        // info!(
+        //     "ack_nr input is {} , packet ack_nr is {}",
+        //     ack_nr,
+        //     resp.ack_nr()
+        // );
         resp
     }
 
-    fn register_peer(&mut self, addr: SocketAddr, peer_state : UtpSocketState) {
-
+    fn register_peer(&mut self, addr: SocketAddr, peer_state: UtpSocketState) {
         self.peers.insert(addr, Arc::new(Mutex::new(peer_state)));
-
     }
 
-    fn get_peer(&self, addr: SocketAddr)  -> Option<Arc<Mutex<UtpSocketState>>>{
-
+    fn get_peer(&self, addr: SocketAddr) -> Option<Arc<Mutex<UtpSocketState>>> {
         self.peers.get(&addr).map(|entry| Arc::clone(entry.value()))
-
     }
 
-    fn get_lost_seq_nr(&self, sack: Vec<u8>, ack_nr: u16, limit_seq: u16) -> Vec<u16> {
-
+    fn get_lost_seq_nr(&self, packet: &Packet, peer: &mut UtpSocketState) -> Vec<u16> {
         let mut result = Vec::new();
-        for (index, val) in sack.iter().enumerate() {
-            for bit in 0..8 {
-                //if this x is zero it means the packet is missing
-                let x = (val>>bit & 1u8) == 0u8;
-                if x  {
-                    // eprintln!("last ack is {}", ack_nr);
-                    let seq_nr = 8*(index as u16) + bit +1 + ack_nr;
-                    if limit_seq > seq_nr {
-                        result.push(seq_nr);
-                    }else{
-                        return result;
-                    }
+
+
+        let mut ack_packets = Vec::new();
+
+        for extension in packet.extensions() {
+            if extension.get_type() == ExtensionType::SelectiveAck {
+
+
+                if let Some((last_seq_nr, _)) = peer.sent_window.last_key_value() {
+                    let lost_packets = extension
+                        .iter()
+                        .enumerate()
+                        .for_each(|(idx, received)|{
+
+                            let seq_nr = packet.ack_nr() + 1 + idx as u16;
+
+
+                            if seq_nr < *last_seq_nr{
+
+                               if received {
+                                   ack_packets.push(seq_nr);
+                               } else{
+                                   result.push(seq_nr)
+                               }
+                            }
+
+
+                        });
+
                 }
             }
         }
 
-        result
 
+        for seq_nr in ack_packets {
+            //we shall resend these
+
+            peer.sent_window.remove(&seq_nr);
+        }
+
+        result
     }
 }
-
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bit_iterator::BitIterator;
     use std::ops::Range;
     use tokio::sync::mpsc;
 
@@ -775,33 +807,27 @@ mod tests {
         packet_type: PacketType,
         seq_nr: u16,
         ack_nr: u16,
-        connection_id: u16
+        connection_id: u16,
     ) -> Packet {
-
         let mut packet = Packet::new();
         packet.set_type(packet_type);
         packet.set_seq_nr(seq_nr);
         packet.set_ack_nr(ack_nr);
         packet.set_connection_id(connection_id);
         packet
-
     }
 
     async fn create_socket(addr: SocketAddr) -> UtpSocket {
-
-
         let ch = mpsc::channel(100);
-        let mut socket = UtpSocket::bind(None , Some(ch.0), false, false).await;
+        let mut socket = UtpSocket::bind(None, Some(ch.0), false, false).await;
         let mut peer_state = UtpSocketState::new(1);
         peer_state.state = SocketState::Connected;
         socket.register_peer(addr, peer_state);
         socket
-
     }
 
     #[tokio::test]
-    async fn test_packet_transfer(){
-
+    async fn test_packet_transfer() {
         let server_addr = SocketAddr::from_str("127.0.0.1:8080").unwrap();
         let server = create_socket(server_addr).await;
         let client_addr = SocketAddr::from_str("127.0.0.1:8081").unwrap();
@@ -814,15 +840,14 @@ mod tests {
         // Simulate sending packets : 0,1,2,3,4,5,6,8
         //we need to access that peer
         for seq_nr in 0..8 {
-
-            let data_packet = create_test_packet(PacketType::Data, seq_nr, client_peer.last_acked, seq_nr);
+            let data_packet =
+                create_test_packet(PacketType::Data, seq_nr, client_peer.last_acked, seq_nr);
             //we also need to update the peer state that has been sent
             //as this message is being sent from client to server . so
             client_peer.sent_window.insert(seq_nr, data_packet.clone());
             //peer state shall be of server _ peer
             let _ = server.handle_packet(&data_packet, &mut server_peer);
-
-        };
+        }
         eprintln!("{:?}", server_peer);
         // Simulate Ack reception
         let ack_packets = vec![
@@ -836,7 +861,6 @@ mod tests {
             create_test_packet(PacketType::Ack, 7, 8, 1),
         ];
 
-
         //we are getting ack back on client from server
         for ack in ack_packets {
             let _ = client.handle_packet(&ack, &mut client_peer);
@@ -848,14 +872,10 @@ mod tests {
         assert!(!client_peer.sent_window.contains_key(&4));
         assert!(!client_peer.sent_window.contains_key(&5));
         assert!(!client_peer.sent_window.contains_key(&6));
-
-
     }
 
-
     #[tokio::test]
-    async fn test_packet_loss(){
-
+    async fn test_packet_loss() {
         let server_addr = SocketAddr::from_str("127.0.0.1:8080").unwrap();
         let client_addr = SocketAddr::from_str("127.0.0.1:8081").unwrap();
 
@@ -868,22 +888,21 @@ mod tests {
         let mut server_peer = s_peer.lock().await;
         let mut client_peer = c_peer.lock().await;
 
-
         //first we will send from client
 
-        let mut send_packets = |range: Range<u16>|{
-
-            for seq_nr in range{
-
-                let data_packet = create_test_packet(PacketType::Data, seq_nr, client_peer.last_acked, client_peer.sender_id);
+        let mut send_packets = |range: Range<u16>| {
+            for seq_nr in range {
+                let data_packet = create_test_packet(
+                    PacketType::Data,
+                    seq_nr,
+                    client_peer.last_acked,
+                    client_peer.sender_id,
+                );
 
                 client_peer.sent_window.insert(seq_nr, data_packet.clone());
                 server_peer.incoming_buffer.push_back(data_packet.clone());
                 let _ = server.handle_packet(&data_packet, &mut server_peer);
-
-
             }
-
         };
 
         send_packets(0..4);
@@ -903,7 +922,6 @@ mod tests {
             create_test_packet(PacketType::Ack, 1, 2, 1),
             create_test_packet(PacketType::Ack, 2, 3, 1),
             create_test_packet(PacketType::Ack, 3, 4, 1),
-
             //for eg this packet number 4 is lost
             //once this thing happens ... we will send the last acknowledge packet
             create_test_packet(PacketType::Ack, 5, 6, 1),
@@ -912,17 +930,14 @@ mod tests {
         ];
 
         for ack in ack_packets {
-
             //Now client will receive them
             let _ = client.handle_packet(&ack, &mut client_peer);
-
         }
 
         // assert!(client_peer.sent_window.contains_key(&3));
         assert!(client_peer.sent_window.contains_key(&4));
         assert!(client_peer.sent_window.contains_key(&5));
         assert!(client_peer.sent_window.contains_key(&6));
-
     }
 
     #[tokio::test]
@@ -936,6 +951,9 @@ mod tests {
         let s_peer = server.get_peer(server_addr).unwrap();
         let mut server_peer = s_peer.lock().await;
 
+        let c_peer = client.get_peer(client_addr).unwrap();
+        let mut client_peer = c_peer.lock().await;
+
         server_peer.ack_nr = 3;
         let last_ack = 3;
 
@@ -943,8 +961,10 @@ mod tests {
         let mut send_packets = |range: Range<u16>| {
             for seq_nr in range {
                 let data_packet = create_test_packet(PacketType::Data, seq_nr, last_ack, 1);
-                server_peer.incoming_buffer.push_back(data_packet.clone());
+
                 let _ = server.handle_packet(&data_packet, &mut server_peer);
+
+                client_peer.sent_window.insert(seq_nr, data_packet.clone());
             }
         };
 
@@ -959,7 +979,8 @@ mod tests {
         assert_eq!(4, sack.len()); // Ensure correct SACK length
 
         // Test that the SACK is properly stored in the packet
-        let mut packet = create_test_packet(PacketType::Ack, 0, 1, 1);
+        let mut packet = create_test_packet(PacketType::Ack, 0, 3, 1);
+
         packet.set_sack(sack.clone());
 
         // Retrieve SACK from packet and verify
@@ -967,140 +988,237 @@ mod tests {
         assert_eq!(retrieved_sack, Some(sack.clone()));
 
         // Detect lost packets
-        let lost_packets = server.get_lost_seq_nr(sack, last_ack, 23);
+
+        //this thing shall be decided by client
+
+        let lost_packets = client.get_lost_seq_nr(&packet, &mut client_peer);
         eprintln!("Lost packets detected: {:?}", lost_packets);
         assert_eq!(lost_packets, vec![4, 10, 11, 12, 13, 14]); // Expected missing packets
     }
-    // #[tokio::test]
-    // async fn test_bidirectional_packet_loss() {
-    //     // Setup test addresses and sockets
-    //     let server_addr = SocketAddr::from_str("127.0.0.1:8080").unwrap();
-    //     let client_addr = SocketAddr::from_str("127.0.0.1:8081").unwrap();
-    //
-    //     let server = create_socket(server_addr).await;
-    //     let client = create_socket(client_addr).await;
-    //
-    //     let s_peer = server.get_peer(server_addr).unwrap();
-    //     let c_peer = client.get_peer(client_addr).unwrap();
-    //
-    //     let mut server_peer = s_peer.lock().await;
-    //     let mut client_peer = c_peer.lock().await;
-    //
-    //     // Part 1: Simulate normal packet flow
-    //     eprintln!("=== Testing normal packet flow ===");
-    //
-    //     for seq_nr in 0..10{
-    //         let data_packet = create_test_packet(
-    //             PacketType::Data,
-    //             seq_nr,
-    //             client_peer.last_acked,
-    //             client_peer.sender_id
-    //         );
-    //
-    //         client_peer.sent_window.insert(seq_nr, data_packet.clone());
-    //         client_peer.seq_nr +=1;
-    //
-    //     }
-    //
-    //     // Send packets 0-3 (successful transmission)
-    //     for seq_nr in 0..=4 {
-    //         // Client sends data packet
-    //         let data_packet = create_test_packet(
-    //             PacketType::Data,
-    //             seq_nr,
-    //             client_peer.last_acked,
-    //             client_peer.sender_id
-    //         );
-    //         eprintln!("Client sending data packet seq_nr: {}", seq_nr);
-    //
-    //         // Client records sent packet
-    //         // client_peer.sent_window.insert(seq_nr, data_packet.clone());
-    //         server_peer.incoming_buffer.push_back(data_packet.clone());
-    //         // Server receives and processes data packet
-    //         let ack_response = server.handle_packet(&data_packet, &mut server_peer).unwrap();
-    //
-    //         // Server sends ACK back
-    //         if let Some(ack_packet) = ack_response {
-    //             eprintln!("Server sending ACK for seq_nr: {}", seq_nr);
-    //             assert_eq!(ack_packet.get_type(), PacketType::Ack);
-    //             assert_eq!(ack_packet.ack_nr(), seq_nr+1);
-    //
-    //             // Client processes ACK
-    //
-    //             client.handle_packet(&ack_packet, &mut client_peer).unwrap();
-    //             // Verify client's sent_window is updated
-    //             assert!(!client_peer.sent_window.contains_key(&seq_nr),
-    //                     "Client should remove acknowledged packet {} from sent_window", seq_nr);
-    //         }
-    //     }
-    //
-    //     // Part 2: Simulate packet loss
-    //     eprintln!("=== Testing packet loss scenario ===");
-    //
-    //     // Send packets with gaps (simulating loss of 4, 5, 6)
-    //     for seq_nr in vec![7, 8, 9, 10] {
-    //         // Client sends data packet
-    //         let data_packet = create_test_packet(
-    //             PacketType::Data,
-    //             seq_nr,
-    //             client_peer.last_acked,
-    //             client_peer.sender_id
-    //         );
-    //         eprintln!("Client sending data packet seq_nr: {}", seq_nr);
-    //
-    //         // Client records sent packet
-    //         // client_peer.sent_window.insert(seq_nr, data_packet.clone());
-    //
-    //         // Server receives and processes out-of-order packet
-    //         let ack_response = server.handle_packet(&data_packet, &mut server_peer).unwrap();
-    //
-    //         // Server sends SACK
-    //         if let Some(ack_packet) = ack_response {
-    //             eprintln!("Server sending SACK for out-of-order seq_nr: {}", seq_nr);
-    //             assert_eq!(ack_packet.get_type(), PacketType::Ack);
-    //             assert!(ack_packet.get_sack().is_some(), "Server should include SACK for out-of-order packets");
-    //
-    //             // Client processes SACK
-    //             client.handle_packet(&ack_packet, &mut client_peer).unwrap();
-    //         }
-    //     }
-    //
-    //     // Part 3: Retransmission of lost packets
-    //     eprintln!("=== Testing retransmission ===");
-    //
-    //     for seq_nr in 5..=6 {
-    //         // Client retransmits lost packet
-    //         let retransmit_packet = create_test_packet(
-    //             PacketType::Data,
-    //             seq_nr,
-    //             client_peer.last_acked,
-    //             client_peer.sender_id
-    //         );
-    //         eprintln!("Client retransmitting packet seq_nr: {}", seq_nr);
-    //
-    //         // Server receives retransmitted packet
-    //         let ack_response = server.handle_packet(&retransmit_packet, &mut server_peer).unwrap();
-    //
-    //         // Server sends ACK for retransmitted packet
-    //         if let Some(ack_packet) = ack_response {
-    //             eprintln!("Server acknowledging retransmitted packet seq_nr: {}", seq_nr);
-    //
-    //             // Client processes ACK
-    //             client.handle_packet(&ack_packet, &mut client_peer).unwrap();
-    //
-    //             // Verify retransmitted packet is acknowledged
-    //             // assert!(!client_peer.sent_window.contains_key(&seq_nr),
-    //             //         "Client should remove retransmitted packet {} after ACK", seq_nr);
-    //
-    //         }
-    //     }
-    //
-    //     // Print final statistics
-    //     eprintln!("=== Final Statistics ===");
-    //     eprintln!("Server last_acked: {}", server_peer.last_acked);
-    //     eprintln!("Client sent_window size: {}", client_peer.sent_window.len());
-    //     eprintln!("Server out_of_order size: {}", server_peer.out_of_order.len());
-    // }
 
+    #[tokio::test]
+    async fn test_server_handle_packet() {
+        let server_addr = SocketAddr::from_str("127.0.0.1:8080").unwrap();
 
+        let server = create_socket(server_addr).await;
+
+        let s_peer = server.get_peer(server_addr).unwrap();
+        let mut server_peer = s_peer.lock().await;
+
+        let mut responses = Vec::new();
+
+        for seq_nr in 0..10 {
+            let data_packet = create_test_packet(PacketType::Data, seq_nr, 1, 1);
+
+            if let Some(resp) = server
+                .handle_packet(&data_packet, &mut server_peer)
+                .unwrap()
+            {
+                responses.push(resp);
+            };
+        }
+
+        assert_eq!(9, server_peer.last_acked);
+
+        for (ack_nr, resp) in responses.iter().enumerate() {
+            assert_eq!(ack_nr as u16, resp.ack_nr())
+        }
+    }
+
+    ///test for packet loss from client
+    #[tokio::test]
+    async fn test_server_handle_packet_loss() {
+        let server_addr = SocketAddr::from_str("127.0.0.1:8080").unwrap();
+        let server = create_socket(server_addr).await;
+
+        let s_peer = server.get_peer(server_addr).unwrap();
+        let mut server_peer = s_peer.lock().await;
+
+        let mut responses = Vec::new();
+        for seq_nr in 0..4 {
+            let data_packet = create_test_packet(PacketType::Data, seq_nr, 1, 1);
+
+            if let Some(resp) = server
+                .handle_packet(&data_packet, &mut server_peer)
+                .unwrap()
+            {
+                responses.push(resp);
+            };
+        }
+
+        //packet number 4 is missing
+
+        for seq_nr in 5..20 {
+            let data_packet = create_test_packet(PacketType::Data, seq_nr, 1, 1);
+            assert_eq!(20, data_packet.len());
+            if let Some(resp) = server
+                .handle_packet(&data_packet, &mut server_peer)
+                .unwrap()
+            {
+                responses.push(resp);
+            };
+        }
+
+        assert_eq!(3, server_peer.last_acked);
+
+        assert_eq!(0, responses[0].ack_nr());
+        assert_eq!(1, responses[0].seq_nr());
+
+        assert_eq!(2, responses[1].seq_nr());
+        assert_eq!(1, responses[1].ack_nr());
+
+        assert_eq!(3, responses[2].seq_nr());
+        assert_eq!(2, responses[2].ack_nr());
+
+        assert_eq!(4, responses[3].seq_nr());
+        assert_eq!(3, responses[3].ack_nr());
+        assert_eq!(None, responses[3].get_sack());
+
+        assert_eq!(3, responses[4].ack_nr());
+        assert_eq!(4, responses[4].get_sack().unwrap().iter().len());
+        assert_eq!(20, responses[3].len());
+        // assert_eq!(0, responses[4].get_sack().unwrap()[0]);
+        eprintln!("{:?}", responses[4].get_sack().unwrap());
+        assert_eq!(4, responses[4].seq_nr());
+
+        assert_eq!(3, responses[5].ack_nr());
+        assert_eq!(6, responses[5].get_sack().unwrap()[0]);
+        assert_eq!(3, responses[6].ack_nr());
+        assert_eq!(14, responses[6].get_sack().unwrap()[0]);
+
+        assert_eq!(3, responses[7].ack_nr());
+        assert_eq!(3, responses[8].ack_nr());
+
+        assert_eq!(26, responses[8].len());
+        assert_eq!(PacketType::Ack, responses[0].get_type());
+        assert_eq!(4, responses[8].get_sack().unwrap().len());
+        assert_eq!(0, responses[8].get_sack().unwrap()[1]);
+        assert_eq!(62, responses[8].get_sack().unwrap()[0]);
+        assert_eq!(19, responses.iter().len());
+        assert_eq!(254, responses[18].get_sack().unwrap()[0]);
+        eprintln!("{:?}", responses[18].get_sack().unwrap());
+        assert_eq!(255, responses[18].get_sack().unwrap()[1]);
+        assert_eq!(0, responses[18].get_sack().unwrap()[2]);
+    }
+
+    #[tokio::test]
+    async fn test_lost_packets() {
+        let server_addr = SocketAddr::from_str("127.0.0.1:8080").unwrap();
+        let server = create_socket(server_addr).await;
+
+        let s_peer = server.get_peer(server_addr).unwrap();
+        let mut server_peer = s_peer.lock().await;
+
+        for seq_nr in 0..20 {
+            let data_packet = create_test_packet(PacketType::Data, seq_nr, 1, 1);
+            server_peer.sent_window.insert(seq_nr, data_packet.clone());
+        }
+
+        let sack1 = vec![2, 0, 0, 0];
+
+        let mut packet = create_test_packet(PacketType::Ack, 2, 2, 1);
+        packet.set_sack(sack1.clone());
+
+        let lost_packets = server.get_lost_seq_nr(&packet, &mut server_peer);
+
+        assert_eq!(26, packet.len());
+        eprintln!("{:?}", packet);
+        eprintln!("{:?}", packet.get_sack());
+        eprintln!("{:?}", lost_packets);
+        let sack2 = vec![4, 0, 0, 0];
+        assert_eq!(ExtensionType::SelectiveAck, packet.get_extension_type());
+    }
+
+    //when we are sending back ack ... the packets with ack nr shall be removed from the
+    #[tokio::test]
+    async fn test_sender_when_receiving_ack() {
+        let client_addr = SocketAddr::from_str("127.0.0.1:8080").unwrap();
+
+        let client = create_socket(client_addr).await;
+
+        let c_peer = client.get_peer(client_addr).unwrap();
+
+        let mut client_peer = c_peer.lock().await;
+
+        //now the server receives proper ack
+        //first this client will send data
+
+        for seq_nr in 0..20 {
+            let data_packet = create_test_packet(PacketType::Data, seq_nr, 1, 1);
+
+            client_peer.sent_window.insert(seq_nr, data_packet.clone());
+        }
+
+        //Now I will receive ack
+
+        for ack_nr in 1..=4 {
+            let ack_packets = create_test_packet(PacketType::Ack, ack_nr, ack_nr, 1);
+
+            let a = client.handle_packet(&ack_packets, &mut client_peer);
+        }
+
+        assert_eq!(16, client_peer.sent_window.len());
+    }
+
+    #[tokio::test]
+    async fn test_packet_reordering() {
+        let server_addr = SocketAddr::from_str("127.0.0.1:8080").unwrap();
+        let server = create_socket(server_addr).await;
+
+        let client_addr = SocketAddr::from_str("127.0.0.1:8081").unwrap();
+        let client = create_socket(client_addr).await;
+
+        let c_peer = client.get_peer(client_addr).unwrap();
+        let mut client_peer = c_peer.lock().await;
+
+        let s_peer = server.get_peer(server_addr).unwrap();
+        let mut server_peer = s_peer.lock().await;
+
+        // Send packets out of order: 1, 3, 2, 4
+        let packets = vec![
+            create_test_packet(PacketType::Data, 1, 0, 1),
+            create_test_packet(PacketType::Data, 3, 0, 1),
+            create_test_packet(PacketType::Data, 2, 0, 1),
+            create_test_packet(PacketType::Data, 4, 0, 1),
+        ];
+
+        for packet in packets {
+            client_peer
+                .sent_window
+                .insert(packet.seq_nr(), packet.clone());
+            let _ = server.handle_packet(&packet, &mut server_peer);
+        }
+
+        // Ensure packets are reordered and acknowledged correctly
+        assert_eq!(4, server_peer.last_acked);
+        assert!(server_peer.out_of_order.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_packet_duplication() {
+        let server_addr = SocketAddr::from_str("127.0.0.1:8080").unwrap();
+        let server = create_socket(server_addr).await;
+
+        let client_addr = SocketAddr::from_str("127.0.0.1:8081").unwrap();
+        let client = create_socket(client_addr).await;
+
+        let c_peer = client.get_peer(client_addr).unwrap();
+        let mut client_peer = c_peer.lock().await;
+
+        let s_peer = server.get_peer(server_addr).unwrap();
+        let mut server_peer = s_peer.lock().await;
+
+        // Send the same packet multiple times
+        let packet = create_test_packet(PacketType::Data, 1, 0, 1);
+        for _ in 0..3 {
+            client_peer
+                .sent_window
+                .insert(packet.seq_nr(), packet.clone());
+            let _ = server.handle_packet(&packet, &mut server_peer);
+        }
+
+        // Ensure the packet is only processed once
+        assert_eq!(1, server_peer.last_acked);
+        assert_eq!(1, server_peer.incoming_buffer.len());
+    }
 }

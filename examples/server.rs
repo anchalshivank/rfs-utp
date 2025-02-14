@@ -58,7 +58,7 @@ async fn main() {
     let addr_string = format!("127.0.0.1:{}", port);
     let socket_addr = SocketAddr::from_str(&addr_string).unwrap();
 
-    let mut server = UtpStream::bind(Some(socket_addr)).await;
+    let mut server = UtpStream::bind(Some(socket_addr), true, false).await;
     let mut buf = [0u8; 25]; // Adjust buffer size as needed
 
     // Use a single read instead of an explicit loop

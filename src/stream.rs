@@ -17,9 +17,9 @@ pub struct UtpStream {
 }
 
 impl UtpStream {
-    pub async fn bind(addr: Option<SocketAddr>) -> UtpStream {
+    pub async fn bind(addr: Option<SocketAddr>, drop: bool, client: bool) -> UtpStream {
         let (sender, receiver) = mpsc::channel(100);
-        let socket = UtpSocket::bind(addr, Some(sender)).await;
+        let socket = UtpSocket::bind(addr, Some(sender), drop, client).await;
         let r = socket.clone();
 
         tokio::spawn(async move {

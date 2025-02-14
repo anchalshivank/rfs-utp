@@ -58,7 +58,7 @@ async fn main() -> io::Result<()> {
     let client_addr = SocketAddr::from_str(&addr).unwrap();
     let server_addr = SocketAddr::from_str("127.0.0.1:8080").unwrap();
 
-    let mut client_stream = UtpStream::bind(Some(client_addr)).await;
+    let mut client_stream = UtpStream::bind(Some(client_addr), false, true).await;
     client_stream.connect(server_addr).await?;
 
     let stdin = io::stdin();
